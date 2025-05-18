@@ -1,4 +1,4 @@
-# 📷 Intelligent Multi-Source Video Analytics & Streaming Platform
+# 📷  Multi-Source Video Analytics & Streaming Platform
 
 This project provides multi-camera streaming, real-time AI-based person detection, RTSP/MJPEG streaming, MQTT event notifications, and a dynamic web-based control panel.
 
