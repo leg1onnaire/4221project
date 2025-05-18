@@ -1,35 +1,30 @@
 # === Intelligent Multi-Source Video Analytics & Streaming Platform ===
-# main_server.py
+# main_server.py (Pure GStreamer Ingestion)
 
-import cv2
 import threading
 import time
-import torch
-import numpy as np
-import warnings
 import json
+import warnings
+import numpy as np
 import paho.mqtt.client as mqtt
 from flask import Flask, Response, request, jsonify
 from yolo_detector import YOLODetector
 
-# RTSP için gerekli
 import gi
 
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
-from gi.repository import Gst, GstRtspServer, GLib
+from gi.repository import Gst, GstRtspServer, GLib, GObject
 
 Gst.init(None)
-
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ========== GLOBALS ==========
 detector = YOLODetector()
 streams = {}
 latest_frames = {}
 mqtt_client = None
 
-# ========== RTSP SERVER ==========
+# ========== RTSP Server ==========
 class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, cam_id):
         super().__init__()
@@ -41,25 +36,21 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
         self.set_launch(self.launch_string)
         self.set_shared(True)
         self.frame = None
-        self.source = None
 
-    def do_configure(self, rtsp_media):
-        self.source = rtsp_media.get_element().get_child_by_name("source")
-        self.source.connect("need-data", self.on_need_data)
+    def do_configure(self, media):
+        appsrc = media.get_element().get_child_by_name("source")
+        appsrc.connect("need-data", self.on_need_data)
 
     def on_need_data(self, src, length):
         if self.frame is None:
             return
-        frame = cv2.resize(self.frame, (640, 480))
-        data = frame.tobytes()
+        data = self.frame.tobytes()
         buf = Gst.Buffer.new_allocate(None, len(data), None)
         buf.fill(0, data)
         timestamp = Gst.util_uint64_scale(Gst.util_get_timestamp(), 1, Gst.SECOND)
         buf.pts = buf.dts = timestamp
         buf.duration = Gst.util_uint64_scale_int(1, Gst.SECOND, 30)
-        retval = src.emit("push-buffer", buf)
-        if retval != Gst.FlowReturn.OK:
-            print(f"[RTSP] Flow error: {retval}")
+        src.emit("push-buffer", buf)
 
 class RTSPServer:
     def __init__(self, port=8554):
@@ -78,9 +69,8 @@ class RTSPServer:
     def add_stream(self, cam_id):
         factory = RTSPMediaFactory(cam_id)
         self.factories[cam_id] = factory
-        path = f"/annotated/{cam_id}"
-        self.mounts.add_factory(path, factory)
-        print(f"[RTSP] Stream available at rtsp://localhost:8554{path}")
+        self.mounts.add_factory(f"/annotated/{cam_id}", factory)
+        print(f"[RTSP] Stream available at rtsp://localhost:8554/annotated/{cam_id}")
 
     def push_frame(self, cam_id, frame):
         if cam_id in self.factories:
@@ -89,54 +79,62 @@ class RTSPServer:
 rtsp_server = RTSPServer()
 rtsp_server.start()
 
-# ========== GStreamer Helper ==========
-def use_gstreamer(url):
-    if isinstance(url, int) or str(url).isdigit():
-        return (
-            f"v4l2src device=/dev/video{url} ! "
-            "video/x-raw, width=640, height=480, framerate=30/1 ! "
-            "videoconvert ! appsink"
-        )
-    return url
-
-# ========== VIDEO INGESTION + ANALYTICS ==========
-class StreamWorker(threading.Thread):
-    def __init__(self, cam_id, source_url):
+# ========== GStreamer Ingestion (No OpenCV) ==========
+class GStreamerCamera(threading.Thread):
+    def __init__(self, cam_id, device_index):
         super().__init__()
         self.cam_id = cam_id
-        self.source_url = source_url
+        self.device_index = device_index
         self.running = False
 
     def run(self):
-        pipeline = use_gstreamer(self.source_url)
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-
-        if not cap.isOpened():
-            print(f"[ERROR] Cannot open {self.source_url}")
-            return
-
+        pipeline_str = (
+            f"v4l2src device=/dev/video{self.device_index} ! "
+            "video/x-raw,width=640,height=480,framerate=30/1 ! "
+            "videoconvert ! video/x-raw,format=BGR ! appsink name=sink emit-signals=true"
+        )
+        pipeline = Gst.parse_launch(pipeline_str)
+        appsink = pipeline.get_by_name("sink")
+        pipeline.set_state(Gst.State.PLAYING)
         self.running = True
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                continue
 
+        def on_new_sample(sink):
+            sample = sink.emit("pull-sample")
+            buf = sample.get_buffer()
+            caps = sample.get_caps()
+            w = caps.get_structure(0).get_value("width")
+            h = caps.get_structure(0).get_value("height")
+            success, mapinfo = buf.map(Gst.MapFlags.READ)
+            if not success:
+                return Gst.FlowReturn.ERROR
+            frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((h, w, 3))
+            buf.unmap(mapinfo)
             annotated, people = detector.detect(frame)
             latest_frames[self.cam_id] = annotated
+            rtsp_server.push_frame(self.cam_id, annotated)
 
             if mqtt_client:
                 topic = f"events/{self.cam_id}/person"
                 msg = json.dumps({"count": people})
                 mqtt_client.publish(topic, msg)
 
-            rtsp_server.push_frame(self.cam_id, annotated)
+            return Gst.FlowReturn.OK
 
-        cap.release()
+        appsink.connect("new-sample", on_new_sample)
+
+        bus = pipeline.get_bus()
+        while self.running:
+            msg = bus.timed_pop_filtered(100 * Gst.MSECOND, Gst.MessageType.ERROR | Gst.MessageType.EOS)
+            if msg:
+                print(f"[GStreamer] Message: {msg.type}")
+                break
+
+        pipeline.set_state(Gst.State.NULL)
 
     def stop(self):
         self.running = False
 
-# ========== STREAMING SERVER (MJPEG via Flask) ==========
+# ========== Flask Web Server ==========
 app = Flask(__name__)
 
 @app.route("/video/<cam_id>")
@@ -145,10 +143,38 @@ def video(cam_id):
         while True:
             frame = latest_frames.get(cam_id)
             if frame is not None:
+                import cv2
                 _, jpeg = cv2.imencode('.jpg', frame)
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
             time.sleep(0.05)
     return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/stream/start", methods=["POST"])
+def start_stream():
+    data = request.json
+    cam_id = data.get("id")
+    device = int(data.get("url", 0))
+    if cam_id in streams:
+        return jsonify({"status": "already running"})
+    rtsp_server.add_stream(cam_id)
+    worker = GStreamerCamera(cam_id, device)
+    worker.start()
+    streams[cam_id] = worker
+    return jsonify({"status": f"started {cam_id}"})
+
+@app.route("/stream/stop", methods=["POST"])
+def stop_stream():
+    data = request.json
+    cam_id = data.get("id")
+    worker = streams.pop(cam_id, None)
+    if worker:
+        worker.stop()
+        return jsonify({"status": f"stopped {cam_id}"})
+    return jsonify({"status": "not running"})
+
+@app.route("/status")
+def status():
+    return jsonify({"active_streams": list(streams.keys())})
 
 @app.route("/dashboard")
 def dashboard():
@@ -217,46 +243,13 @@ def dashboard():
     </html>
     '''
 
-# ========== REST API ==========
-@app.route("/stream/start", methods=["POST"])
-def start_stream():
-    data = request.json
-    cam_id = data.get("id")
-    url = data.get("url")
-
-    if cam_id in streams:
-        return jsonify({"status": "already running"})
-
-    rtsp_server.add_stream(cam_id)
-
-    worker = StreamWorker(cam_id, url)
-    worker.start()
-    streams[cam_id] = worker
-    return jsonify({"status": f"started {cam_id}"})
-
-@app.route("/stream/stop", methods=["POST"])
-def stop_stream():
-    data = request.json
-    cam_id = data.get("id")
-
-    worker = streams.pop(cam_id, None)
-    if worker:
-        worker.stop()
-        return jsonify({"status": f"stopped {cam_id}"})
-    return jsonify({"status": "not running"})
-
-@app.route("/status")
-def status():
-    return jsonify({"active_streams": list(streams.keys())})
-
-# ========== MQTT INTEGRATION ==========
+# ========== MQTT Setup ==========
 def setup_mqtt():
     global mqtt_client
     mqtt_client = mqtt.Client()
     mqtt_client.connect("localhost", 1883, 60)
     mqtt_client.loop_start()
 
-# ========== ENTRY POINT ==========
 if __name__ == '__main__':
     setup_mqtt()
     app.run(host='0.0.0.0', port=8000, threaded=True)
