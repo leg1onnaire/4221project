@@ -1,44 +1,44 @@
 # 📷 Intelligent Multi-Source Video Analytics & Streaming Platform
 
-Bu proje; çoklu kamera yayını, gerçek zamanlı yapay zeka destekli kişi tespiti, RTSP/MJPEG akışı, MQTT olay bildirimi ve dinamik web tabanlı kontrol paneli sunar.
+This project provides multi-camera streaming, real-time AI-based person detection, RTSP/MJPEG streaming, MQTT event notifications, and a dynamic web-based control panel.
 
 ---
 
-## 🚀 Özellikler
+## 🚀 Features
 
-* 🔌 Çoklu webcam / IP kamera yayını
-* 🧠 YOLOv5 ile kişi tespiti
-* 🎥 GStreamer + RTSP yayını (annotated frame)
-* 🌐 MJPEG akışı (web dashboard ve istemci için)
-* 📡 MQTT ile kişi sayısı bildirimi
-* 🖥️ Web tabanlı kontrol paneli (start/stop izleme)
+* 🔌 Multi webcam / IP camera ingestion
+* 🧠 Person detection using YOLOv5
+* 🎥 GStreamer-based RTSP streaming (annotated frames)
+* 🌐 MJPEG stream (for web dashboard & client viewers)
+* 📡 MQTT-based person count publishing
+* 🖥️ Web-based dashboard for controlling streams
 
 ---
 
-## 📁 Dosya Yapısı
+## 📁 File Structure
 
 ```
 project/
-├── main_server.py         # Tüm sistemi yöneten Flask + RTSP + MQTT sunucusu
-├── yolo_detector.py       # YOLOv5 tabanlı tespit modülü
-├── mqtt_module.py         # MQTT istemci sarmalayıcı
-├── client_viewer.py       # OpenCV + MQTT ile izleme aracı
-├── requirements.txt       # Gerekli Python bağımlılıkları
-├── test_stream.sh         # Test bash scripti
-└── README.md              # Bu doküman
+├── main_server.py         # Main Flask + RTSP + MQTT server
+├── yolo_detector.py       # YOLOv5 detection module
+├── mqtt_module.py         # MQTT client wrapper
+├── client_viewer.py       # OpenCV + MQTT viewer client
+├── requirements.txt       # Python dependencies
+├── test_stream.sh         # Bash script for testing stream
+└── README.md              # This documentation
 ```
 
 ---
 
-## ⚙️ Kurulum
+## ⚙️ Installation
 
-### 🐍 Python Paketleri
+### 🐍 Python Packages
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 🧱 Sistem Paketleri (Ubuntu)
+### 🧱 System Packages (Ubuntu)
 
 ```bash
 sudo apt update
@@ -52,15 +52,15 @@ sudo apt install -y \
 
 ---
 
-## ▶️ Kullanım
+## ▶️ Usage
 
-### 🔧 Sunucuyu Başlat
+### 🔧 Start the Server
 
 ```bash
 python3 main_server.py
 ```
 
-### 🎦 Kamera Yayını Başlat
+### 🎦 Start a Camera Stream
 
 ```bash
 curl -X POST http://localhost:8000/stream/start \
@@ -68,21 +68,21 @@ curl -X POST http://localhost:8000/stream/start \
      -d '{"id": "cam_hp", "url": 0}'
 ```
 
-### 🌐 Web Panel
+### 🌐 Web Dashboard
 
-Tarayıcıda aç:
+Open in browser:
 
 ```
 http://localhost:8000/dashboard
 ```
 
-### 📺 RTSP İzleme (VLC)
+### 📺 RTSP Stream via VLC
 
 ```
 rtsp://localhost:8554/annotated/cam_hp
 ```
 
-### 🧪 Test Scripti
+### 🧪 Test Script
 
 ```bash
 bash test_stream.sh
@@ -90,20 +90,18 @@ bash test_stream.sh
 
 ---
 
-## 🧠 Notlar
+## 🧠 Notes
 
-* MJPEG akışı `/video/<cam_id>` endpoint'inden alınabilir.
-* MQTT ile kişi sayısı şu topic'ten yayınlanır: `events/<cam_id>/person`
-* Kameralar dinamik olarak eklenip çıkarılabilir.
+* MJPEG stream is available via `/video/<cam_id>` endpoint.
+* Person count is published to MQTT topic: `events/<cam_id>/person`
+* Cameras can be dynamically added or removed.
 
 ---
 
-## 🛠️ Gereksinimler
+## 🛠️ Requirements
 
 * Python 3.9+
 * OpenCV, Flask, PyTorch, GStreamer, Paho MQTT
 
 ---
-
-
 
