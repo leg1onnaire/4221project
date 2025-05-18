@@ -3,8 +3,8 @@
 
 SERVER_PORT=8000
 SERVER_LOG="server.log"
-CAM_ID="cam_hp"
-DEVICE_ID=0
+CAM_ID="video1"
+DEVICE_ID=1
 
 echo " Checking if Flask server is already running on port $SERVER_PORT..."
 if lsof -i:$SERVER_PORT -t >/dev/null; then
