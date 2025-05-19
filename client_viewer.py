@@ -1,70 +1,100 @@
 import cv2
+import threading
 import paho.mqtt.client as mqtt
 import requests
-import json
-import threading
-import argparse
+import time
 
-# ========== MQTT CALLBACK ==========
+API_SERVER = "http://localhost:8000"
+DEFAULT_STREAM_ID = "video1"
+DEFAULT_STREAM_URL = 1  # Yerel kamera (int olarak gönderiliyor)
+
+# === Stream başlatıcı ===
+def ensure_stream_running(cam_id=DEFAULT_STREAM_ID, cam_url=DEFAULT_STREAM_URL):
+    print(f"[INFO] Checking or starting stream '{cam_id}'...")
+    try:
+        response = requests.post(f"{API_SERVER}/stream/start", json={
+            "id": cam_id,
+            "url": cam_url
+        })
+        if response.status_code == 200:
+            print(f"[INFO] Stream '{cam_id}' started successfully.")
+        elif response.status_code == 400 and "already running" in response.text:
+            print(f"[INFO] Stream '{cam_id}' already running.")
+        else:
+            print(f"[WARNING] Could not start stream: {response.text}")
+    except Exception as e:
+        print(f"[ERROR] Failed to reach API: {e}")
+
+# === RTSP endpoint'lerini API'den çek
+def fetch_rtsp_streams():
+    try:
+        response = requests.get(f"{API_SERVER}/status")
+        data = response.json()
+        streams = data.get("streams", [])
+        endpoints = data.get("rtsp_endpoints", [])
+        return dict(zip(streams, endpoints))
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch stream status: {e}")
+        return {}
+
+# === MQTT Dinleyici ===
 def on_connect(client, userdata, flags, rc):
-    print("[MQTT] Connected with result code ", rc)
-    topic = f"events/{userdata['cam_id']}/person"
-    client.subscribe(topic)
-    print(f"[MQTT] Subscribed to topic: {topic}")
+    print("[MQTT] Connected to broker")
+    client.subscribe("events/#")
 
 def on_message(client, userdata, msg):
-    payload = msg.payload.decode()
-    print(f"[MQTT] {msg.topic} → {payload}")
+    print(f"[MQTT] {msg.topic} → {msg.payload.decode()}")
 
-# ========== VIDEO VIEWER FUNCTION ==========
-def view_stream(url):
+def mqtt_listener():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect("localhost", 1883, 60)
+    client.loop_forever()
+
+# === RTSP Görüntüleyici ===
+def show_stream(name, url):
     cap = cv2.VideoCapture(url)
     if not cap.isOpened():
-        print("[ERROR] Cannot open video stream")
+        print(f"[ERROR] Could not open stream: {name} ({url})")
         return
 
-    print("[INFO] Press 'q' to quit the stream window.")
     while True:
         ret, frame = cap.read()
         if not ret:
+            print(f"[{name}] Frame read failed.")
             break
-        cv2.imshow("Stream Viewer", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        cv2.imshow(f"Stream: {name}", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
+
     cap.release()
     cv2.destroyAllWindows()
 
-# ========== MAIN LAUNCHER ==========
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cam_id", default="cam_hp", help="Camera ID")
-    parser.add_argument("--source", default="0", help="Camera source (int or rtsp URL)")
-    parser.add_argument("--mode", choices=["mjpeg", "rtsp"], default="mjpeg")
-    args = parser.parse_args()
-
-    # Start stream via API
-    payload = {"id": args.cam_id, "url": int(args.source) if args.source.isdigit() else args.source}
-    try:
-        res = requests.post("http://localhost:8000/stream/start", json=payload)
-        print("[API]", res.json())
-    except Exception as e:
-        print("[ERROR] Could not start stream via API:", e)
-
-    # MQTT Setup
-    mqtt_client = mqtt.Client(userdata={"cam_id": args.cam_id})
-    mqtt_client.on_connect = on_connect
-    mqtt_client.on_message = on_message
-    mqtt_client.connect("localhost", 1883, 60)
-
-    mqtt_thread = threading.Thread(target=mqtt_client.loop_forever)
-    mqtt_thread.daemon = True
-    mqtt_thread.start()
-
-    # Stream Viewer
-    if args.mode == "mjpeg":
-        view_stream(f"http://localhost:8000/video/{args.cam_id}")
-    elif args.mode == "rtsp":
-        view_stream(f"rtsp://localhost:8554/annotated/{args.cam_id}")
-
+# === Ana Çalışma Bloğu ===
 if __name__ == "__main__":
-    main()
+    # Otomatik olarak kamera başlat
+    ensure_stream_running()
+
+    print("[INFO] Fetching active RTSP streams from API...")
+    time.sleep(1.5)  # API yanıtı hazır olsun diye ufak bekleme
+    RTSP_STREAMS = fetch_rtsp_streams()
+
+    if not RTSP_STREAMS:
+        print("[WARNING] No active streams found after attempt.")
+    else:
+        print(f"[INFO] Found streams: {list(RTSP_STREAMS.keys())}")
+
+        # MQTT thread başlat
+        threading.Thread(target=mqtt_listener, daemon=True).start()
+
+        # Her RTSP kaynağı için ayrı thread başlat
+        for cam_name, cam_url in RTSP_STREAMS.items():
+            threading.Thread(target=show_stream, args=(cam_name, cam_url), daemon=True).start()
+
+        # Ana thread sonsuz beklesin
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Client terminated.")
