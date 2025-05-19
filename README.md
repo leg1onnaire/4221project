@@ -20,6 +20,7 @@ This project provides multi-camera streaming, real-time AI-based person detectio
 ```
 project/
 ├── main_server.py         # Main Flask + RTSP + MQTT server
+├── gstreamer_server.py    # gstreamer server
 ├── yolo_detector.py       # YOLOv5 detection module
 ├── mqtt_module.py         # MQTT client wrapper
 ├── client_viewer.py       # OpenCV + MQTT viewer client
@@ -57,7 +58,7 @@ sudo apt install -y \
 ### 🔧 Start the Server
 
 ```bash
-python3 main_server.py
+python3 gstreamer_server.py
 ```
 
 ### 🎦 Start a Camera Stream
