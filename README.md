@@ -66,7 +66,7 @@ python3 gstreamer_server.py
 ```bash
 curl -X POST http://localhost:8000/stream/start \
      -H "Content-Type: application/json" \
-     -d '{"id": "cam_hp", "url": 0}'
+     -d '{"id": "cam1", "url": 0}'
 ```
 
 ### 🌐 Web Dashboard
