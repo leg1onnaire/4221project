@@ -1,5 +1,5 @@
 # === Intelligent Multi-Source Video Analytics & Streaming Platform ===
-# main_server.py (Pure GStreamer Ingestion)
+# main_server.py (Dual Stream: Raw & Annotated + Toggle Button)
 
 import threading
 import time
@@ -22,16 +22,20 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 detector = YOLODetector()
 streams = {}
 latest_frames = {}
+raw_frames = {}
 mqtt_client = None
 
-# ========== RTSP Server ==========
+# ========== RTSP Media Factory ==========
 class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
-    def __init__(self, cam_id):
+    def __init__(self, cam_id, use_raw=False):
         super().__init__()
         self.cam_id = cam_id
+        self.use_raw = use_raw
         self.launch_string = (
-            'appsrc name=source is-live=true block=true format=time do-timestamp=true caps="video/x-raw,format=BGR,width=640,height=480,framerate=30/1" ! '
-            'videoconvert ! x264enc tune=zerolatency bitrate=512 speed-preset=superfast ! rtph264pay config-interval=1 name=pay0 pt=96'
+            'appsrc name=source is-live=true block=true format=time do-timestamp=true '
+            'caps="video/x-raw,format=BGR,width=640,height=480,framerate=30/1" ! '
+            'videoconvert ! x264enc tune=zerolatency bitrate=512 speed-preset=superfast ! '
+            'rtph264pay config-interval=1 name=pay0 pt=96'
         )
         self.set_launch(self.launch_string)
         self.set_shared(True)
@@ -42,9 +46,10 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
         appsrc.connect("need-data", self.on_need_data)
 
     def on_need_data(self, src, length):
-        if self.frame is None:
+        frame = raw_frames.get(self.cam_id) if self.use_raw else latest_frames.get(self.cam_id)
+        if frame is None:
             return
-        data = self.frame.tobytes()
+        data = frame.tobytes()
         buf = Gst.Buffer.new_allocate(None, len(data), None)
         buf.fill(0, data)
         timestamp = Gst.util_uint64_scale(Gst.util_get_timestamp(), 1, Gst.SECOND)
@@ -52,6 +57,7 @@ class RTSPMediaFactory(GstRtspServer.RTSPMediaFactory):
         buf.duration = Gst.util_uint64_scale_int(1, Gst.SECOND, 30)
         src.emit("push-buffer", buf)
 
+# ========== RTSP Server ==========
 class RTSPServer:
     def __init__(self, port=8554):
         self.server = GstRtspServer.RTSPServer()
@@ -66,13 +72,26 @@ class RTSPServer:
         self.thread.start()
         print("[RTSP] Server started at rtsp://localhost:8554/")
 
+        
     def add_stream(self, cam_id):
-        factory = RTSPMediaFactory(cam_id)
-        self.factories[cam_id] = factory
-        self.mounts.add_factory(f"/annotated/{cam_id}", factory)
-        print(f"[RTSP] Stream available at rtsp://localhost:8554/annotated/{cam_id}")
+        raw_factory = RTSPMediaFactory(cam_id, use_raw=True)
+        annotated_factory = RTSPMediaFactory(cam_id, use_raw=False)
 
-    def push_frame(self, cam_id, frame):
+        self.mounts.add_factory(f"/raw/{cam_id}", raw_factory)
+        self.mounts.add_factory(f"/annotated/{cam_id}", annotated_factory)
+
+        self.factories[f"raw_{cam_id}"] = raw_factory
+        self.factories[f"annotated_{cam_id}"] = annotated_factory
+
+        print(f"[RTSP] Raw stream available at rtsp://localhost:8554/raw/{cam_id}")
+        print(f"[RTSP] Annotated stream available at rtsp://localhost:8554/annotated/{cam_id}")
+
+
+    def push_frame(self, cam_id, frame, raw=False):
+        if raw:
+            raw_frames[cam_id] = frame
+        else:
+            latest_frames[cam_id] = frame
         if cam_id in self.factories:
             self.factories[cam_id].frame = frame
 
@@ -109,9 +128,9 @@ class GStreamerCamera(threading.Thread):
                 return Gst.FlowReturn.ERROR
             frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((h, w, 3))
             buf.unmap(mapinfo)
+            rtsp_server.push_frame(self.cam_id, frame, raw=True)
             annotated, people = detector.detect(frame)
-            latest_frames[self.cam_id] = annotated
-            rtsp_server.push_frame(self.cam_id, annotated)
+            rtsp_server.push_frame(self.cam_id, annotated, raw=False)
 
             if mqtt_client:
                 topic = f"events/{self.cam_id}/person"
@@ -142,6 +161,18 @@ def video(cam_id):
     def gen():
         while True:
             frame = latest_frames.get(cam_id)
+            if frame is not None:
+                import cv2
+                _, jpeg = cv2.imencode('.jpg', frame)
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+            time.sleep(0.05)
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/video_raw/<cam_id>")
+def video_raw(cam_id):
+    def gen():
+        while True:
+            frame = raw_frames.get(cam_id)
             if frame is not None:
                 import cv2
                 _, jpeg = cv2.imencode('.jpg', frame)
@@ -198,21 +229,32 @@ def dashboard():
       <div class="grid" id="cameraGrid"></div>
 
       <script>
-        const cameras = ["cam_hp", "cam2", "cam3"]
+        const cameras = ["cam1", "cam2", "cam3"]
 
         function createCameraCard(cam_id) {
           const card = document.createElement("div")
           card.className = "card"
+          const streamType = cam_id === "cam1" ? "raw" : "annotated"
           card.innerHTML = `
             <h3>${cam_id}</h3>
+            <p>RTSP: rtsp://localhost:8554/${streamType}/${cam_id}</p>
             <img id="img_${cam_id}" src="/video/${cam_id}" />
             <div>
               <button onclick="startStream('${cam_id}')">Start</button>
               <button onclick="stopStream('${cam_id}')">Stop</button>
             </div>
+            <div>
+              <button onclick="toggleStream('${cam_id}')">Toggle Raw/Annotated</button>
+            </div>
             <p id="status_${cam_id}">Not running</p>
           `
           return card
+        }
+
+        function toggleStream(cam_id) {
+          const img = document.getElementById(`img_${cam_id}`)
+          const isRaw = img.src.includes("video_raw")
+          img.src = isRaw ? `/video/${cam_id}` : `/video_raw/${cam_id}`
         }
 
         async function startStream(cam_id) {
