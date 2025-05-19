@@ -80,7 +80,7 @@ http://localhost:8000/dashboard
 ### 📺 RTSP Stream via VLC
 
 ```
-rtsp://localhost:8554/annotated/cam_hp
+rtsp://localhost:8554/raw/cam_id
 ```
 
 ### 🧪 Test Script
